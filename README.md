@@ -1,12 +1,35 @@
-# Carousel Post Generator 🎨
+# Carousel AI Agent 🎨
 
-A production-ready FastAPI application powered by LangGraph that automatically generates engaging carousel posts from article URLs. Uses AI to create slide content and generates custom images for each slide using Gemini via OpenRouter.
+[![Python](https://img.shields.io/badge/Python-3.11+-blue.svg)](https://www.python.org/downloads/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115.0-green.svg)](https://fastapi.tiangolo.com)
+[![LangGraph](https://img.shields.io/badge/LangGraph-Latest-orange.svg)](https://github.com/langchain-ai/langgraph)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+**Carousel AI Agent** is a production-ready FastAPI application powered by LangGraph that automatically generates engaging carousel posts from article URLs. This AI agent uses advanced language models to create slide content and generates custom images for each slide using **Google nano banana model** via OpenRouter.
+
+## 📑 Table of Contents
+
+- [Features](#-features)
+- [Security Features](#-security-features)
+- [Architecture](#️-architecture)
+- [Prerequisites](#-prerequisites)
+- [Quick Start](#-quick-start)
+- [API Usage](#-api-usage)
+- [Output](#-output)
+- [Use Cases](#-use-cases)
+- [Best Practices](#-best-practices)
+- [Configuration](#-configuration)
+- [Troubleshooting](#-troubleshooting)
+- [Production Deployment](#-production-deployment)
+- [How It Works](#-how-it-works)
+- [Contributing](#-contributing)
+- [License](#-license)
 
 ## 🌟 Features
 
 - **Automatic Article Scraping**: Uses Playwright to scrape article content from any URL
 - **AI-Powered Slide Generation**: Uses GPT-4o-mini to create engaging carousel slides from article content
-- **Custom Image Generation**: Generates unique images for each slide using Gemini 2.5 Flash via OpenRouter
+- **Custom Image Generation**: Generates unique images for each slide using Google nano banana model via OpenRouter
 - **Local Image Storage**: Automatically saves generated images in a folder named after the post title
 - **Structured Output**: Saves carousel posts in both Markdown and JSON formats with images in the same folder
 - **Configurable Slides**: Customize the number of slides (3-15, default: 10)
@@ -23,11 +46,11 @@ A production-ready FastAPI application powered by LangGraph that automatically g
 
 ## 🏗️ Architecture
 
-Built using **LangGraph** and **FastAPI** with:
+**Carousel AI Agent** is built using **LangGraph** and **FastAPI** with:
 - **State Management**: TypedDict-based state tracking
 - **Web Scraping**: Playwright for article content extraction
 - **LLM Orchestration**: GPT-4o-mini for slide content generation
-- **Image Generation**: Gemini 2.5 Flash via OpenRouter for custom images
+- **Image Generation**: Google nano banana model via OpenRouter for custom images
 - **Local Storage**: Automatic file organization in output folders
 
 ### Workflow
@@ -38,17 +61,19 @@ Article URL → Scrape Content → Generate Slides → Generate Images → Save 
 
 ## 📋 Prerequisites
 
-- Python 3.11+
-- OpenAI API key (required for slide generation)
-- OpenRouter API key (required for image generation)
-- API key for authentication (optional, set `API_KEY` in `.env`)
+Before you begin, ensure you have:
+
+- **Python 3.11+** installed on your system
+- **OpenAI API key** (required for slide generation)
+- **OpenRouter API key** (required for image generation using Google nano banana model)
+- **API key for authentication** (optional, set `API_KEY` in `.env` for production)
 
 ## 🚀 Quick Start
 
 ### 1. Clone the Repository
 
 ```bash
-git clone <repository-url>
+git clone https://github.com/yourusername/carousel-post-generator.git
 cd carousel-post-generator
 ```
 
@@ -101,6 +126,8 @@ python main.py
 The API will be available at `http://localhost:8000`
 
 ## 📚 API Usage
+
+The **Carousel AI Agent** provides a RESTful API for generating carousel posts.
 
 ### Health Check
 
@@ -160,7 +187,7 @@ Once the server is running, visit:
 
 ## 📊 Output
 
-The API automatically saves results to the `output/` directory:
+The **Carousel AI Agent** automatically saves results to the `output/` directory:
 
 ### File Structure
 
@@ -186,11 +213,14 @@ output/
 
 ## 🎯 Use Cases
 
-- **Social Media Content**: Create engaging Instagram/LinkedIn carousels
-- **Content Repurposing**: Convert blog posts into shareable carousel format
-- **Educational Content**: Break down complex topics into digestible slides
-- **Marketing**: Transform product articles into promotional carousels
-- **Personal Branding**: Create thought leadership content from your articles
+Perfect for:
+
+- **Social Media Content**: Create engaging Instagram/LinkedIn carousels that drive engagement
+- **Content Repurposing**: Convert blog posts into shareable carousel format for multiple platforms
+- **Educational Content**: Break down complex topics into digestible, visual slides
+- **Marketing**: Transform product articles into promotional carousels with custom visuals
+- **Personal Branding**: Create thought leadership content from your articles with consistent branding
+- **Content Automation**: Automate carousel creation workflow for content teams
 
 ## 📈 Best Practices
 
@@ -334,7 +364,7 @@ CMD ["gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "
 
 ```
 carousel-post-generator/
-├── main.py                              # FastAPI application
+├── main.py                              # FastAPI application for Carousel AI Agent
 ├── carousel_post_generator_agent.py     # LangGraph agent implementation
 ├── output/                              # Generated carousels and images
 ├── requirements.txt                     # Python dependencies
@@ -346,7 +376,7 @@ carousel-post-generator/
 
 ### 1. Article Scraping (Playwright)
 
-The agent uses Playwright to:
+The **Carousel AI Agent** uses Playwright to:
 - Navigate to the article URL
 - Wait for dynamic content to load
 - Extract article title, content, and metadata
@@ -355,24 +385,26 @@ The agent uses Playwright to:
 
 ### 2. Slide Generation (GPT-4o-mini)
 
-The LLM:
+The AI agent's LLM:
 - Analyzes the article content
 - Identifies key points and insights
 - Creates engaging, concise slide content
 - Generates detailed image prompts for each slide
 - Ensures slides tell a cohesive story
 
-### 3. Image Generation (Gemini via OpenRouter)
+### 3. Image Generation (Google nano banana via OpenRouter)
 
-For each slide:
+For each slide, the **Carousel AI Agent**:
 - Uses the LLM-generated image prompt
-- Calls OpenRouter's Gemini 2.5 Flash image generation API
+- Calls OpenRouter's Google nano banana model image generation API
 - Receives base64-encoded image
 - Decodes and saves as PNG file locally
 - Stores the local file path with the slide data
 - Images are saved in the same folder as the markdown and JSON files
 
 ## ⚠️ Limitations
+
+**Carousel AI Agent** has the following limitations:
 
 - **Image Generation Time**: Generating images for 10 slides takes ~1-2 minutes
 - **Cost**: OpenRouter API calls for image generation (check OpenRouter pricing)
@@ -382,22 +414,28 @@ For each slide:
 
 ## 🤝 Contributing
 
-Contributions are welcome! To add new features:
+Contributions to **Carousel AI Agent** are welcome! To add new features:
 
 1. Create new tools or nodes in the agent
 2. Update state definition if needed
 3. Add to README documentation
 4. Test thoroughly with the API endpoints
 
+Please ensure your contributions align with the project's architecture and coding standards.
+
 ## 📄 License
 
-MIT License - feel free to use in your projects!
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🌟 Star History
+
+If you find this project useful, please consider giving it a ⭐ on GitHub!
 
 ## 🙏 Acknowledgments
 
 - Built with [LangChain](https://langchain.com) and [LangGraph](https://github.com/langchain-ai/langgraph)
 - Powered by [OpenAI](https://openai.com) for content generation
-- Image generation via [OpenRouter](https://openrouter.ai) and Gemini
+- Image generation via [OpenRouter](https://openrouter.ai) using Google nano banana model
 - API framework: [FastAPI](https://fastapi.tiangolo.com)
 - Browser automation: [Playwright](https://playwright.dev)
 
@@ -417,7 +455,8 @@ For issues or questions:
 
 ---
 
-**Built with ❤️ using LangGraph and FastAPI**
+---
 
-Start generating amazing carousel posts today! 🎨
-# Carousel-Post-Generator-AI-Agent
+**Carousel AI Agent** - Built with ❤️ using LangGraph and FastAPI
+
+Start generating amazing carousel posts with AI today! 🎨
