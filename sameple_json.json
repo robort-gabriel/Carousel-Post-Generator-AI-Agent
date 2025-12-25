@@ -1,0 +1,28 @@
+{
+  "font_name": "Inter",
+  "background_info": "Solid dark background using #101010 with subtle texture overlay",
+  "color_schema": "#101010 background with white primary text (#FFFFFF) and electric blue accent text (#00D9FF) for highlights and call-to-action elements"
+}
+{
+  "font_name": "SF Pro Display",
+  "background_info": "Deep charcoal background (#101010) with subtle radial gradient from center",
+  "color_schema": "#101010 base background, white text (#FFFFFF) for titles, cyan accent (#00FFFF) for bullet points and highlights, orange (#FF6B35) for call-to-action buttons"
+}
+
+{
+  "font_name": "Roboto",
+  "background_info": "Solid #101010 background with minimal geometric patterns",
+  "color_schema": "#101010 background, white text (#FFFFFF) for main content, light gray (#E0E0E0) for secondary text, vibrant green (#00FF88) for accents"
+}
+
+{
+  "font_name": "Montserrat",
+  "background_info": "#101010 dark background with subtle code-inspired grid pattern overlay",
+  "color_schema": "#101010 background, pure white (#FFFFFF) for titles, neon purple (#B026FF) for key points, yellow (#FFD700) for emphasis and CTAs"
+}
+
+{
+  "font_name": "Inter",
+  "background_info": "Solid dark background using #101010 with subtle texture overlay",
+  "color_schema": "#101010 background with white primary text (#FFFFFF) and electric blue accent text (#00D9FF) for highlights and call-to-action elements"
+}

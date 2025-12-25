@@ -1,8 +1,9 @@
 """
-Standalone LangGraph Agent for Carousel Post Generation
+Standalone LangGraph Agent for Social Media Content Generation
 
 This is a production-ready, standalone backend agent that uses LangGraph
-to orchestrate carousel post generation from article content.
+to orchestrate social media content generation from article content.
+Supports both carousel posts and single informational images.
 
 INSTALLATION:
     pip install -r requirements.txt
@@ -76,18 +77,39 @@ logger = logging.getLogger(__name__)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 
+# Image generation provider configuration
+IMAGE_PROVIDER = os.getenv("IMAGE_PROVIDER", "openrouter")  # "openrouter" or "openai"
+IMAGE_MODEL = os.getenv(
+    "IMAGE_MODEL", None
+)  # Model name (e.g., "dall-e-3", "google/gemini-2.5-flash-image")
+
 
 # ============================================================================
 # State Definition
 # ============================================================================
 
 
-class CarouselPostState(TypedDict):
-    """State for the carousel post generator agent."""
+class SocialMediaContentState(TypedDict):
+    """State for the social media content generator agent."""
 
     messages: Annotated[List, lambda x, y: x + y]
     url: str
     max_slides: int
+    username: Optional[str]  # Social media username (e.g., "@robots")
+    tagline: Optional[
+        str
+    ]  # Tagline/brand message (e.g., "daily programming tips & tricks")
+    title: Optional[str]  # Custom title to override scraped article title
+    extra_instructions: Optional[str]  # Additional instructions for the LLM
+    font_name: Optional[str]  # Font name for slides (e.g., "Arial", "Roboto")
+    background_info: Optional[str]  # Background description for slides
+    color_schema: Optional[str]  # Color schema description for slides
+    image_provider: Optional[
+        str
+    ]  # Image generation provider ("openrouter" or "openai")
+    image_model: Optional[
+        str
+    ]  # Image generation model (e.g., "dall-e-3", "google/gemini-2.5-flash-image")
     output_folder: Optional[Path]  # Folder for saving images
     article_content: Optional[Dict[str, Any]]
     slides: Optional[List[Dict[str, Any]]]
@@ -237,32 +259,369 @@ async def scrape_article_content(url: str) -> Dict[str, Any]:
 
 
 # ============================================================================
-# Image Generation (OpenRouter Gemini)
+# Image Generation (OpenRouter Gemini & OpenAI DALL-E)
 # ============================================================================
 
 
-def generate_carousel_image(
-    prompt: str, slide_number: int, output_folder: Path, orientation: str = "square"
+def generate_image_with_openai_dalle(
+    prompt: str,
+    slide_number: int,
+    output_folder: Path,
+    orientation: str = "square",
+    model: str = "dall-e-3",
+    size: str = "1024x1024",
+    quality: str = "standard",
 ) -> Optional[Dict[str, str]]:
     """
-    Generate an image for a carousel slide using OpenRouter Gemini API and save locally.
+    Generate an image using OpenAI image generation API (DALL-E or GPT-Image models).
 
     Args:
         prompt: Image generation prompt
         slide_number: Slide number for naming
         output_folder: Folder to save the image in
         orientation: Image orientation (square recommended for carousels)
+        model: Model to use ("dall-e-3", "dall-e-2", "gpt-image-1.5", etc.)
+        size: Image size ("1024x1024", "1792x1024", "1024x1792", "1536x1024", "1024x1536")
+        quality: Image quality ("standard", "hd", "high", "medium", "low", or "auto")
 
     Returns:
         Dictionary with local image path and metadata, or None if failed
     """
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY not found in environment variables")
+        return None
+
+    try:
+        logger.info(f"Generating image with OpenAI {model} for slide {slide_number}")
+
+        # OpenAI image generation API endpoint
+        url = "https://api.openai.com/v1/images/generations"
+
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+            "Content-Type": "application/json",
+        }
+
+        # Determine size based on orientation and model
+        if orientation == "square":
+            image_size = "1024x1024"
+        elif orientation == "vertical":
+            # GPT-Image models support portrait sizes
+            if model.startswith("gpt-image"):
+                image_size = "1024x1536"
+            elif model == "dall-e-3":
+                image_size = "1024x1792"
+            else:
+                image_size = "1024x1024"
+        else:
+            image_size = size
+
+        # Build payload
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "size": image_size,
+            "n": 1,
+        }
+
+        # Add quality parameter based on model
+        if model == "dall-e-3":
+            payload["quality"] = quality
+        elif model.startswith("gpt-image"):
+            # GPT-Image models support: "high", "medium", "low", or "auto"
+            if quality in ["high", "medium", "low", "auto"]:
+                payload["quality"] = quality
+            else:
+                # Map DALL-E quality to GPT-Image quality
+                quality_map = {"standard": "medium", "hd": "high"}
+                payload["quality"] = quality_map.get(quality, "auto")
+
+            # GPT-Image models always return base64, but we can request it explicitly
+            # Note: response_format is only supported for dall-e-2, GPT-Image models always return base64
+            # So we don't need to set response_format for GPT-Image models
+
+        response = requests.post(url, headers=headers, json=payload, timeout=120)
+
+        if response.status_code == 200:
+            data = response.json()
+
+            if "data" in data and len(data["data"]) > 0:
+                image_data = data["data"][0]
+
+                # Check for URL or base64 response
+                if "url" in image_data:
+                    # Download image from URL
+                    image_url = image_data["url"]
+                    img_response = requests.get(image_url, timeout=60)
+                    if img_response.status_code == 200:
+                        image_bytes = img_response.content
+                    else:
+                        logger.error(f"Failed to download image from URL: {image_url}")
+                        return None
+                elif "b64_json" in image_data:
+                    # Decode base64 image
+                    image_bytes = base64.b64decode(image_data["b64_json"])
+                else:
+                    logger.error("No image data found in OpenAI response")
+                    return None
+
+                # Save image locally
+                save_result = save_image_locally(
+                    image_bytes, output_folder, slide_number, prompt
+                )
+
+                if save_result:
+                    logger.info(
+                        f"Successfully generated and saved image with OpenAI {model} for slide {slide_number}"
+                    )
+                    return {
+                        "path": save_result["path"],
+                        "filename": save_result["filename"],
+                        "relative_path": save_result["relative_path"],
+                        "prompt": prompt,
+                        "slide_number": slide_number,
+                    }
+                else:
+                    logger.error("Failed to save image locally")
+                    return None
+            else:
+                logger.error("No image data in OpenAI response")
+                return None
+        else:
+            logger.error(
+                f"OpenAI API returned status code {response.status_code}: {response.text}"
+            )
+            return None
+
+    except Exception as e:
+        logger.error(f"Error generating image with OpenAI {model}: {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+def generate_image_with_openai_edits(
+    prompt: str,
+    slide_number: int,
+    output_folder: Path,
+    reference_image_base64: str,
+    orientation: str = "square",
+    model: str = "gpt-image-1",
+    size: str = "1024x1024",
+    quality: str = "auto",
+) -> Optional[Dict[str, str]]:
+    """
+    Generate an image using OpenAI images/edits endpoint with reference image (GPT-Image models).
+
+    Args:
+        prompt: Image generation prompt
+        slide_number: Slide number for naming
+        output_folder: Folder to save the image in
+        reference_image_base64: Base64-encoded reference image to use as design guide
+        orientation: Image orientation (square recommended for carousels)
+        model: GPT-Image model to use ("gpt-image-1", "gpt-image-1.5", etc.)
+        size: Image size ("1024x1024", "1536x1024", "1024x1536", or "auto")
+        quality: Image quality ("high", "medium", "low", or "auto")
+
+    Returns:
+        Dictionary with local image path and metadata, or None if failed
+    """
+    if not OPENAI_API_KEY:
+        logger.warning("OPENAI_API_KEY not found in environment variables")
+        return None
+
+    try:
+        logger.info(
+            f"Generating image with OpenAI {model} (edits endpoint) for slide {slide_number} using reference image"
+        )
+
+        # OpenAI images/edits API endpoint (supports reference images)
+        url = "https://api.openai.com/v1/images/edits"
+
+        # Determine size based on orientation
+        if orientation == "square":
+            image_size = "1024x1024"
+        elif orientation == "vertical":
+            image_size = "1024x1536"
+        else:
+            image_size = size
+
+        # Decode base64 reference image to bytes
+        try:
+            reference_image_bytes = base64.b64decode(reference_image_base64)
+        except Exception as e:
+            logger.error(f"Failed to decode reference image base64: {e}")
+            return None
+
+        # Prepare multipart/form-data payload
+        # The image parameter accepts a single file or array of files
+        # For requests library with multipart/form-data, we use a tuple: (filename, file_bytes, content_type)
+        files = {"image": ("reference.png", reference_image_bytes, "image/png")}
+
+        data = {
+            "model": model,
+            "prompt": prompt,
+            "size": image_size,
+            "n": 1,
+        }
+
+        # Add quality parameter for GPT-Image models
+        if quality in ["high", "medium", "low", "auto"]:
+            data["quality"] = quality
+        else:
+            data["quality"] = "auto"
+
+        headers = {
+            "Authorization": f"Bearer {OPENAI_API_KEY}",
+        }
+
+        response = requests.post(
+            url, headers=headers, files=files, data=data, timeout=120
+        )
+
+        if response.status_code == 200:
+            result = response.json()
+
+            if "data" in result and len(result["data"]) > 0:
+                image_data = result["data"][0]
+
+                # GPT-Image models always return base64
+                if "b64_json" in image_data:
+                    image_bytes = base64.b64decode(image_data["b64_json"])
+                elif "url" in image_data:
+                    # Fallback to URL if provided
+                    image_url = image_data["url"]
+                    img_response = requests.get(image_url, timeout=60)
+                    if img_response.status_code == 200:
+                        image_bytes = img_response.content
+                    else:
+                        logger.error(f"Failed to download image from URL: {image_url}")
+                        return None
+                else:
+                    logger.error("No image data found in OpenAI response")
+                    return None
+
+                # Save image locally
+                save_result = save_image_locally(
+                    image_bytes, output_folder, slide_number, prompt
+                )
+
+                if save_result:
+                    logger.info(
+                        f"Successfully generated and saved image with OpenAI {model} (edits) for slide {slide_number}"
+                    )
+                    return {
+                        "path": save_result["path"],
+                        "filename": save_result["filename"],
+                        "relative_path": save_result["relative_path"],
+                        "prompt": prompt,
+                        "slide_number": slide_number,
+                    }
+                else:
+                    logger.error("Failed to save image locally")
+                    return None
+            else:
+                logger.error("No image data in OpenAI response")
+                return None
+        else:
+            logger.error(
+                f"OpenAI API returned status code {response.status_code}: {response.text}"
+            )
+            return None
+
+    except Exception as e:
+        logger.error(f"Error generating image with OpenAI {model} (edits): {e}")
+        logger.error(traceback.format_exc())
+        return None
+
+
+def generate_carousel_image(
+    prompt: str,
+    slide_number: int,
+    output_folder: Path,
+    orientation: str = "square",
+    reference_image_base64: Optional[str] = None,
+    provider: str = "openrouter",
+    model: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """
+    Generate an image for a carousel slide using OpenRouter or OpenAI API and save locally.
+
+    Args:
+        prompt: Image generation prompt
+        slide_number: Slide number for naming
+        output_folder: Folder to save the image in
+        orientation: Image orientation (square recommended for carousels)
+        reference_image_base64: Optional base64-encoded reference image to use as design guide
+        provider: Image generation provider ("openrouter" or "openai")
+        model: Model name (e.g., "dall-e-3", "dall-e-2", "gpt-image-1", "gpt-image-1.5", "google/gemini-2.5-flash-image")
+               If None, uses default based on provider
+
+    Returns:
+        Dictionary with local image path and metadata, or None if failed
+    """
+    # Route to OpenAI if provider is "openai"
+    if provider.lower() == "openai":
+        openai_model = model or "dall-e-3"
+
+        # GPT-Image models support reference images via the edits endpoint
+        if reference_image_base64 and openai_model.startswith("gpt-image"):
+            logger.info(
+                f"Using OpenAI {openai_model} edits endpoint with reference image"
+            )
+            return generate_image_with_openai_edits(
+                prompt=prompt,
+                slide_number=slide_number,
+                output_folder=output_folder,
+                reference_image_base64=reference_image_base64,
+                orientation=orientation,
+                model=openai_model,
+            )
+        # DALL-E models don't support reference images
+        elif reference_image_base64:
+            logger.warning(
+                f"OpenAI {openai_model} doesn't support reference images. "
+                "Reference image will be ignored. "
+                "Consider using 'gpt-image-1' or 'gpt-image-1.5' for reference image support, "
+                "or use 'openrouter' provider with a vision model."
+            )
+
+        # Use generations endpoint for DALL-E or GPT-Image without reference
+        return generate_image_with_openai_dalle(
+            prompt=prompt,
+            slide_number=slide_number,
+            output_folder=output_folder,
+            orientation=orientation,
+            model=openai_model,
+        )
+
+    # Default to OpenRouter (existing logic)
     if not OPENROUTER_API_KEY:
         logger.warning("OPENROUTER_API_KEY not found in environment variables")
         return None
 
     try:
         # Create carousel-optimized prompt
-        full_prompt = f"Create a {orientation} carousel slide image: {prompt}. Make it clean, modern, and visually engaging with clear focal point. Perfect for social media carousel."
+        if reference_image_base64:
+            design_instruction = f"""CRITICAL INSTRUCTION: You MUST create a new image that is an EXACT REPLICA of the attached reference image's design, but with NEW CONTENT.
+
+REPLICATE EXACTLY FROM THE REFERENCE IMAGE:
+- SAME background color/gradient (copy the exact colors)
+- SAME card/box layout and grid structure (copy the exact layout)
+- SAME header bar style, shape, and colors
+- SAME card shapes, corner radius, and shadows
+- SAME typography style, font weights, and text colors
+- SAME icon placement and style
+- SAME spacing, margins, and padding between elements
+- SAME overall visual hierarchy and structure
+
+ONLY CHANGE THE TEXT CONTENT TO:
+{prompt}
+
+The final image should look like it was made from the same template as the reference image - a viewer should not be able to tell the difference in design style. Only the text content should be different.
+
+Generate a {orientation} infographic that is visually IDENTICAL to the reference image in terms of design, layout, and style."""
+        else:
+            design_instruction = f"Create a {orientation} carousel slide image: {prompt}. Make it clean, modern, and visually engaging with clear focal point. Perfect for social media carousel."
 
         logger.info(f"Generating image for slide {slide_number}: {prompt}")
 
@@ -276,9 +635,27 @@ def generate_carousel_image(
             "X-Title": "ContentRob",
         }
 
+        # Build message content
+        if reference_image_base64:
+            # Include reference image in the message
+            message_content = [
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:image/png;base64,{reference_image_base64}"
+                    },
+                },
+                {"type": "text", "text": design_instruction},
+            ]
+        else:
+            message_content = design_instruction
+
+        # Use provided model or default based on provider
+        openrouter_model = model or "google/gemini-2.5-flash-image"
+
         payload = {
-            "model": "google/gemini-2.5-flash-image",
-            "messages": [{"role": "user", "content": full_prompt}],
+            "model": openrouter_model,
+            "messages": [{"role": "user", "content": message_content}],
             "modalities": ["image", "text"],
         }
 
@@ -289,8 +666,27 @@ def generate_carousel_image(
 
             if "choices" in data and len(data["choices"]) > 0:
                 choice = data["choices"][0]
+
+                # Check for errors in the response (some APIs return 200 with error in body)
+                if "error" in choice:
+                    error_info = choice["error"]
+                    error_message = error_info.get("message", "Unknown error")
+                    error_code = error_info.get("code", "unknown")
+                    logger.error(
+                        f"API returned error in response: {error_message} (code: {error_code})"
+                    )
+                    return None
+
                 message = choice.get("message", {})
 
+                # Check if message content is empty (indicates an error or incomplete response)
+                if not message.get("content") and not message.get("images"):
+                    logger.error(
+                        f"Empty response from API. Finish reason: {choice.get('finish_reason', 'unknown')}"
+                    )
+                    return None
+
+                # Check for image response (Gemini format)
                 if "images" in message and len(message["images"]) > 0:
                     image_data = message["images"][0]
 
@@ -322,10 +718,112 @@ def generate_carousel_image(
                                 logger.error("Failed to save image locally")
                                 return None
 
-        logger.error(
-            f"OpenRouter API returned status code {response.status_code}: {response.text}"
-        )
-        return None
+                # Check for SVG/text response (Grok and other text-based models)
+                content = message.get("content", "")
+
+                # Skip if content is empty (error case already handled above)
+                if not content or not content.strip():
+                    logger.error(
+                        f"No content in response. Finish reason: {choice.get('finish_reason', 'unknown')}"
+                    )
+                    return None
+
+                if content and (
+                    "<svg" in content.lower()
+                    or "```svg" in content.lower()
+                    or "svg" in content.lower()
+                ):
+                    logger.info(
+                        f"Detected SVG response from model, converting to PNG..."
+                    )
+
+                    # Extract SVG code from markdown code blocks if present
+                    svg_content = content
+
+                    # First, try to extract from ```svg code block
+                    if "```svg" in content.lower():
+                        svg_match = re.search(
+                            r"```svg\s*(.*?)\s*```", content, re.DOTALL | re.IGNORECASE
+                        )
+                        if svg_match:
+                            svg_content = svg_match.group(1).strip()
+                    # Then try generic code block that might contain SVG
+                    elif "```" in content and "<svg" in content.lower():
+                        svg_match = re.search(
+                            r"```[^\n]*\s*(.*?)\s*```", content, re.DOTALL
+                        )
+                        if svg_match:
+                            potential_svg = svg_match.group(1).strip()
+                            if "<svg" in potential_svg.lower():
+                                svg_content = potential_svg
+
+                    # Extract SVG tag if it's embedded in text (handles cases where SVG is in text without code blocks)
+                    if "<svg" in svg_content.lower():
+                        svg_match = re.search(
+                            r"<svg.*?</svg>", svg_content, re.DOTALL | re.IGNORECASE
+                        )
+                        if svg_match:
+                            svg_content = svg_match.group(0)
+
+                    # Convert SVG to PNG using cairosvg or fallback method
+                    try:
+                        import cairosvg
+
+                        image_bytes = cairosvg.svg2png(
+                            bytestring=svg_content.encode("utf-8")
+                        )
+
+                        # Save image locally
+                        save_result = save_image_locally(
+                            image_bytes, output_folder, slide_number, prompt
+                        )
+
+                        if save_result:
+                            logger.info(
+                                f"Successfully converted SVG and saved image for slide {slide_number}"
+                            )
+                            return {
+                                "path": save_result["path"],
+                                "filename": save_result["filename"],
+                                "relative_path": save_result["relative_path"],
+                                "prompt": prompt,
+                                "slide_number": slide_number,
+                            }
+                        else:
+                            logger.error("Failed to save converted SVG image locally")
+                            return None
+                    except ImportError:
+                        logger.error(
+                            "cairosvg not installed. Install it with: pip install cairosvg"
+                        )
+                        logger.error(
+                            "Grok and other text-based models return SVG code. "
+                            "Please install cairosvg to convert SVG to images, "
+                            "or use a model that generates images directly (e.g., google/gemini-2.5-flash-image)"
+                        )
+                        return None
+                    except Exception as e:
+                        logger.error(f"Error converting SVG to PNG: {e}")
+                        logger.error(traceback.format_exc())
+                        return None
+                else:
+                    # Content exists but doesn't contain SVG - log for debugging
+                    logger.warning(
+                        f"Response contains content but no SVG detected. Content preview: {content[:200]}..."
+                    )
+                    logger.error(
+                        f"Unable to process response. Expected image or SVG format. "
+                        f"Finish reason: {choice.get('finish_reason', 'unknown')}"
+                    )
+                    return None
+            else:
+                logger.error("No choices in API response")
+                return None
+        else:
+            logger.error(
+                f"OpenRouter API returned status code {response.status_code}: {response.text}"
+            )
+            return None
 
     except Exception as e:
         logger.error(f"Error generating image: {e}")
@@ -341,7 +839,7 @@ def generate_carousel_image(
 class LLMService:
     """Service for generating carousel slide content using LLM."""
 
-    def __init__(self, model_name: str = "gpt-5", temperature: float = 1):
+    def __init__(self, model_name: str = "gpt-5.2-2025-12-11", temperature: float = 1):
         if not OPENAI_API_KEY:
             raise ValueError("OPENAI_API_KEY environment variable is required")
 
@@ -352,7 +850,16 @@ class LLMService:
         )
 
     def generate_carousel_slides(
-        self, article_content: Dict[str, Any], max_slides: int = 10
+        self,
+        article_content: Dict[str, Any],
+        max_slides: int = 10,
+        username: Optional[str] = None,
+        tagline: Optional[str] = None,
+        title: Optional[str] = None,
+        extra_instructions: Optional[str] = None,
+        font_name: Optional[str] = None,
+        background_info: Optional[str] = None,
+        color_schema: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
         Generate carousel slide content from article.
@@ -360,12 +867,17 @@ class LLMService:
         Args:
             article_content: Scraped article content
             max_slides: Maximum number of slides to generate
+            username: Social media username (e.g., "@robots")
+            tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+            title: Custom title to override scraped article title
+            extra_instructions: Additional instructions for the LLM
 
         Returns:
             List of slide dictionaries with title, content, and image prompt
         """
         try:
-            title = article_content.get("title", "Unknown")
+            # Use custom title if provided, otherwise use scraped title
+            title = title or article_content.get("title", "Unknown")
             full_text = article_content.get("fullText", "")
             meta_desc = article_content.get("metaDescription", "")
 
@@ -403,6 +915,28 @@ class LLMService:
 
             # Respond ONLY with the JSON array, no other text.
             # """
+            # Set defaults for username and tagline
+            display_username = username or "@coding180.com"
+            display_tagline = tagline or "Daily AI Tools & Agents"
+
+            # Set defaults for design parameters
+            display_font_name = font_name or "modern sans-serif font"
+            display_background = (
+                background_info
+                or "Clean gradient or subtle tech/coding theme (dark navy/blue/purple or modern light mode)"
+            )
+            display_color_schema = (
+                color_schema
+                or "Consistent across all slides (e.g., navy background, white + cyan accent text)"
+            )
+
+            # Build extra instructions section if provided
+            extra_instructions_section = ""
+            if extra_instructions:
+                extra_instructions_section = (
+                    f"\n=== ADDITIONAL INSTRUCTIONS ===\n{extra_instructions}\n"
+                )
+
             prompt = f"""
 You are an expert LinkedIn/Instagram carousel designer who creates HIGHLY ENGAGING informational carousels that get thousands of saves and shares.
 
@@ -422,20 +956,21 @@ Every slide image must contain the text (title + content) directly on the image 
 - Slide {max_slides}: Final CTA slide
   - Short recap or strongest takeaway
   - Big call-to-action: "Save this carousel for later!", "Which tip will you try first?", "Tag a friend who needs this!"
-  - Prominent text: "Follow @robots for daily programming tips & tricks →"
+  - Prominent text: "Follow {display_username} for {display_tagline} →"
   - Optional: your logo or handle in the corner
 
 === DESIGN RULES FOR EVERY IMAGE_PROMPT (CRITICAL) ===
 All slides must look like professional Canva-style carousel slides:
-- Format: 1080x1080px or 1080x1350px (square or vertical)
-- Background: Clean gradient or subtle tech/coding theme (dark navy/blue/purple or modern light mode)
-- Color scheme: Consistent across all slides (e.g., navy background, white + cyan accent text)
-- Title: Extra large bold sans-serif font (e.g., Montserrat Black), top 20% of slide
+- Format: Square or vertical orientation (1080x1080 or 1080x1350 aspect ratio)
+- Background: {display_background}
+- Color scheme: {display_color_schema}
+- Title: Extra large bold {display_font_name}, top portion of slide
 - Body text: Clean bullet points, highly readable, max 7 lines
 - Add "Slide X of {max_slides}" in small text at top-right or bottom-right
 - Add subtle relevant icons (code symbols, laptop, lightbulb, rocket, etc.)
-- Add small "@robots" handle in bottom-left or bottom-right corner on every slide
+- Add small "{display_username}" handle in bottom-left or bottom-right corner on every slide
 - High contrast, modern, premium feel — looks expensive
+- DO NOT include technical specifications like pixel sizes, font names, font sizes, or hex color codes in the image prompts
 
 === OUTPUT FORMAT ===
 Return ONLY a valid JSON array (no markdown, no explanation). Each object must have exactly these keys:
@@ -445,11 +980,10 @@ Return ONLY a valid JSON array (no markdown, no explanation). Each object must h
     "slide_number": 1,
     "title": "Exact title text that will appear on the image",
     "content": "Exact body text that will appear on the image (use \\n for line breaks in bullets)",
-    "image_prompt": "Extremely detailed prompt that forces Gemini to render the exact title and content as text on the image. Include layout, colors, fonts, and all text verbatim."
+    "image_prompt": "Extremely detailed prompt that forces Gemini to render the exact title and content as text on the image. Include layout, colors, fonts, and all text verbatim. Do NOT include pixel sizes, font names, font sizes, or hex color codes."
   }}
 ]
-
-
+{extra_instructions_section}
 Article Title: {title}
 Meta Description: {meta_desc}
 Full Article Text:
@@ -476,13 +1010,416 @@ Now generate exactly {max_slides} slides following all rules above.
             logger.error(f"Error generating carousel slides: {str(e)}")
             raise
 
+    def generate_carousel_from_prompt(
+        self,
+        user_prompt: str,
+        max_slides: int = 10,
+        username: Optional[str] = None,
+        tagline: Optional[str] = None,
+        font_name: Optional[str] = None,
+        background_info: Optional[str] = None,
+        color_schema: Optional[str] = None,
+        extra_instructions: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate carousel slide content from a user text prompt.
+
+        Args:
+            user_prompt: User's text prompt (e.g., "top 10 free AI tools", "how to learn React")
+            max_slides: Maximum number of slides to generate
+            username: Social media username (e.g., "@robots")
+            tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+            font_name: Font name for the carousel slides
+            background_info: Background description
+            color_schema: Color schema description
+            extra_instructions: Additional instructions for the LLM
+
+        Returns:
+            List of slide dictionaries with title, content, and image prompt
+        """
+        try:
+            # Set defaults for username and tagline
+            display_username = username or "@coding180.com"
+            display_tagline = tagline or "Daily AI Tools & Agents"
+
+            # Set defaults for design parameters
+            display_font_name = font_name or "modern sans-serif font"
+            display_background = (
+                background_info
+                or "Clean gradient or subtle tech/coding theme (dark navy/blue/purple or modern light mode)"
+            )
+            display_color_schema = (
+                color_schema
+                or "Consistent across all slides (e.g., navy background, white + cyan accent text)"
+            )
+
+            # Build extra instructions section if provided
+            extra_instructions_section = ""
+            if extra_instructions:
+                extra_instructions_section = (
+                    f"\n=== ADDITIONAL INSTRUCTIONS ===\n{extra_instructions}\n"
+                )
+
+            prompt = f"""
+You are an expert LinkedIn/Instagram carousel designer who creates HIGHLY ENGAGING informational carousels that get thousands of saves and shares.
+
+Your job: Create exactly {max_slides} beautiful, text-on-image carousel slides based on the user's prompt below.
+Every slide image must contain the text (title + content) directly on the image — no separate caption text, no illustrative-only images.
+
+=== PROMPT ANALYSIS ===
+Analyze the user's prompt to understand what content to create:
+- LIST TYPE: Prompts asking for lists, rankings, collections (e.g., "top 10 AI tools", "5 best practices", "7 ways to...")
+  - Generate a comprehensive, accurate list based on current knowledge
+  - Extract or create the list items (numbered or bulleted)
+  - Ensure items are relevant, accurate, and valuable
+  - If the prompt mentions a specific number (e.g., "top 10"), generate exactly that many items
+  - Distribute items across slides logically (e.g., 2-3 items per slide for a 10-item list)
+
+- GUIDE/TUTORIAL TYPE: Prompts asking for explanations, concepts, guides, tips (e.g., "how to learn React", "explain machine learning", "benefits of TypeScript")
+  - Create a comprehensive guide with key points
+  - Extract main concepts, benefits, or key takeaways
+  - Organize into logical sections across slides
+  - Each slide should cover a distinct concept or step
+
+=== STRICT SLIDE STRUCTURE ===
+- Slide 1: Hook / Introduction slide
+  - Big catchy title (derived from the user prompt)
+  - 1–2 sentence teaser explaining what the carousel covers
+  - End with "Swipe →" or "Keep reading →"
+- Slides 2 to {max_slides-1}: Content slides
+  - Distribute the main content logically across these slides
+  - Use short, scannable bullet points
+  - Each slide should be self-contained but part of a cohesive story
+  - Group related points together
+- Slide {max_slides}: Final CTA slide
+  - Short recap or strongest takeaway
+  - Big call-to-action: "Save this carousel for later!", "Which tip will you try first?", "Tag a friend who needs this!"
+  - Prominent text: "Follow {display_username} for {display_tagline} →"
+  - Optional: your logo or handle in the corner
+
+=== CONTENT GENERATION RULES ===
+- Be accurate, helpful, and current
+- Use clear, concise language
+- Prioritize the most valuable information
+- For lists: Ensure all items are relevant to the prompt
+- For guides: Focus on the most important concepts and steps
+- Make content actionable and valuable
+
+=== DESIGN RULES FOR EVERY IMAGE_PROMPT (CRITICAL) ===
+All slides must look like professional Canva-style carousel slides:
+- Format: Square or vertical orientation (1080x1080 or 1080x1350 aspect ratio)
+- Background: {display_background}
+- Color scheme: {display_color_schema}
+- Title: Extra large bold {display_font_name}, top portion of slide
+- Body text: Clean bullet points, highly readable, max 7 lines
+- Add "Slide X of {max_slides}" in small text at top-right or bottom-right
+- Add subtle relevant icons (code symbols, laptop, lightbulb, rocket, etc.)
+- Add small "{display_username}" handle in bottom-left or bottom-right corner on every slide
+- High contrast, modern, premium feel — looks expensive
+- DO NOT include technical specifications like pixel sizes, font names, font sizes, or hex color codes in the image prompts
+
+=== OUTPUT FORMAT ===
+Return ONLY a valid JSON array (no markdown, no explanation). Each object must have exactly these keys:
+
+[
+  {{
+    "slide_number": 1,
+    "title": "Exact title text that will appear on the image",
+    "content": "Exact body text that will appear on the image (use \\n for line breaks in bullets)",
+    "image_prompt": "Extremely detailed prompt that forces Gemini to render the exact title and content as text on the image. Include layout, colors, fonts, and all text verbatim. Do NOT include pixel sizes, font names, font sizes, or hex color codes."
+  }}
+]
+{extra_instructions_section}
+User Prompt: {user_prompt}
+
+Now generate exactly {max_slides} slides following all rules above.
+"""
+
+            logger.info(f"Generating carousel slides from prompt: {user_prompt}")
+            response = self.llm.invoke([{"role": "user", "content": prompt}])
+            response_text = response.content.strip()
+
+            # Extract JSON from response
+            # Remove markdown code blocks if present
+            if response_text.startswith("```"):
+                response_text = re.sub(r"```json\s*|\s*```", "", response_text).strip()
+
+            slides = json.loads(response_text)
+
+            logger.info(
+                f"Successfully generated {len(slides)} carousel slides from prompt"
+            )
+            return slides
+
+        except Exception as e:
+            logger.error(f"Error generating carousel slides from prompt: {str(e)}")
+            raise
+
+    def generate_single_informational_image(
+        self,
+        article_content: Dict[str, Any],
+        username: Optional[str] = None,
+        tagline: Optional[str] = None,
+        title: Optional[str] = None,
+        extra_instructions: Optional[str] = None,
+        font_name: Optional[str] = None,
+        background_info: Optional[str] = None,
+        color_schema: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate a single informational image from article.
+        - If list post: extracts list items and creates one image with the list
+        - If general article: summarizes and creates one image
+
+        Args:
+            article_content: Scraped article content
+            username: Social media username (e.g., "@robots")
+            tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+            title: Custom title to override scraped article title
+            extra_instructions: Additional instructions for the LLM
+
+        Returns:
+            Dictionary with title, content, and image prompt
+        """
+        try:
+            # Use custom title if provided, otherwise use scraped title
+            title = title or article_content.get("title", "Unknown")
+            full_text = article_content.get("fullText", "")
+            meta_desc = article_content.get("metaDescription", "")
+
+            # Set defaults for username and tagline
+            display_username = username or "@coding_robort"
+            display_tagline = tagline or "daily programming tips & tricks"
+
+            # Set defaults for design parameters
+            display_font_name = font_name or "modern sans-serif font"
+            display_background = (
+                background_info
+                or "Clean gradient or subtle tech/coding theme (dark navy/blue/purple or modern light mode)"
+            )
+            display_color_schema = (
+                color_schema
+                or "Modern and visually appealing (e.g., navy background, white + cyan accent text)"
+            )
+
+            # Build extra instructions section if provided
+            extra_instructions_section = ""
+            if extra_instructions:
+                extra_instructions_section = (
+                    f"\n=== ADDITIONAL INSTRUCTIONS ===\n{extra_instructions}\n"
+                )
+
+            prompt = f"""
+You are an expert social media content designer who creates HIGHLY ENGAGING informational images.
+
+Your job: Analyze the article below and create a SINGLE informational image that summarizes the key content.
+
+=== ANALYSIS INSTRUCTIONS ===
+1. First, determine if this is a LIST POST or GENERAL ARTICLE:
+   - LIST POST: Contains numbered/bulleted lists, "Top X", "Best X", "X Ways to", "X Tips", etc.
+   - GENERAL ARTICLE: Regular article with paragraphs, explanations, no clear list structure
+
+2. If LIST POST:
+   - Extract ALL list items (numbered or bulleted)
+   - Create a single image with:
+     * Main title (the article title or a punchy version)
+     * All list items clearly displayed (numbered or bulleted)
+     * Clean, organized layout that fits all items
+   - Keep each list item concise (1-2 lines max)
+   - If there are too many items (more than 10), select the most important ones
+
+3. If GENERAL ARTICLE:
+   - Create a comprehensive summary image with:
+     * Main title (the article title or a punchy version)
+     * Key takeaways (3-5 main points as bullet points)
+     * Brief summary paragraph (2-3 sentences)
+   - Focus on the most valuable information
+
+=== DESIGN RULES FOR IMAGE_PROMPT (CRITICAL) ===
+The image must look like a professional informational graphic:
+- Format: Square or vertical orientation (1080x1080 or 1080x1350 aspect ratio)
+- Background: {display_background}
+- Color scheme: {display_color_schema}
+- Title: Extra large bold {display_font_name}, top portion of image
+- Content: Clean, organized layout with clear hierarchy
+- Add small "{display_username}" handle in bottom-left or bottom-right corner
+- High contrast, modern, premium feel — looks expensive
+- DO NOT include technical specifications like pixel sizes, font names, font sizes, or hex color codes in the image prompts
+
+=== OUTPUT FORMAT ===
+Return ONLY a valid JSON object (no markdown, no explanation) with exactly these keys:
+
+{{
+  "is_list_post": true/false,
+  "title": "Exact title text that will appear on the image",
+  "content": "Exact content that will appear on the image (use \\n for line breaks, numbered or bulleted format)",
+  "image_prompt": "Extremely detailed prompt that forces Gemini to render the exact title and content as text on the image. Include layout, colors, fonts, and all text verbatim. Do NOT include pixel sizes, font names, font sizes, or hex color codes."
+}}
+{extra_instructions_section}
+Article Title: {title}
+Meta Description: {meta_desc}
+Full Article Text:
+{full_text}
+
+Now analyze the article and generate the single informational image following all rules above.
+"""
+
+            logger.info("Generating single informational image with LLM...")
+            response = self.llm.invoke([{"role": "user", "content": prompt}])
+            response_text = response.content.strip()
+
+            # Extract JSON from response
+            # Remove markdown code blocks if present
+            if response_text.startswith("```"):
+                response_text = re.sub(r"```json\s*|\s*```", "", response_text).strip()
+
+            result = json.loads(response_text)
+
+            logger.info(
+                f"Successfully generated single informational image (is_list_post: {result.get('is_list_post', False)})"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"Error generating single informational image: {str(e)}")
+            raise
+
+    def generate_infographic_from_prompt(
+        self,
+        user_prompt: str,
+        username: Optional[str] = None,
+        tagline: Optional[str] = None,
+        font_name: Optional[str] = None,
+        background_info: Optional[str] = None,
+        color_schema: Optional[str] = None,
+        extra_instructions: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Generate an infographic from a user text prompt.
+        - Analyzes the prompt to determine if it's a list type (e.g., "top 10 tools") or summary type
+        - If list: Generates the list items based on the prompt
+        - If summary: Creates a summary infographic
+        - Then generates the infographic image
+
+        Args:
+            user_prompt: User's text prompt (e.g., "top 10 free AI tools")
+            username: Social media username (e.g., "@robots")
+            tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+            font_name: Font name for the infographic
+            background_info: Background description
+            color_schema: Color schema description
+            extra_instructions: Additional instructions for the LLM
+
+        Returns:
+            Dictionary with title, content, image prompt, and type (list/summary)
+        """
+        try:
+            # Set defaults for username and tagline
+            display_username = username or "@coding_robort"
+            display_tagline = tagline or "daily programming tips & tricks"
+
+            # Set defaults for design parameters
+            display_font_name = font_name or "modern sans-serif font"
+            display_background = (
+                background_info
+                or "Clean gradient or subtle tech/coding theme (dark navy/blue/purple or modern light mode)"
+            )
+            display_color_schema = (
+                color_schema
+                or "Modern and visually appealing (e.g., navy background, white + cyan accent text)"
+            )
+
+            # Build extra instructions section if provided
+            extra_instructions_section = ""
+            if extra_instructions:
+                extra_instructions_section = (
+                    f"\n=== ADDITIONAL INSTRUCTIONS ===\n{extra_instructions}\n"
+                )
+
+            prompt = f"""
+You are an expert social media content designer who creates HIGHLY ENGAGING informational infographics from user prompts.
+
+Your job: Analyze the user's prompt below and create a SINGLE informational infographic.
+
+=== PROMPT ANALYSIS ===
+First, analyze the user's prompt to determine the type:
+1. LIST TYPE: Prompts asking for lists, rankings, collections (e.g., "top 10 AI tools", "5 best practices", "7 ways to...", "best free tools")
+   - For LIST TYPE: Generate a comprehensive, accurate list based on current knowledge
+   - Extract or create the list items (numbered or bulleted)
+   - Ensure items are relevant, accurate, and valuable
+   - If the prompt mentions a specific number (e.g., "top 10"), generate exactly that many items
+   - Each item should be concise but informative (1-2 lines max)
+
+2. SUMMARY TYPE: Prompts asking for explanations, concepts, guides, tips (e.g., "how to use React hooks", "explain machine learning", "benefits of TypeScript")
+   - For SUMMARY TYPE: Create a comprehensive summary with key points
+   - Extract main concepts, benefits, or key takeaways
+   - Organize into 3-7 main points as bullet points
+   - Add a brief summary paragraph (2-3 sentences)
+
+=== CONTENT GENERATION RULES ===
+- Be accurate, helpful, and current
+- Use clear, concise language
+- Prioritize the most valuable information
+- For lists: Ensure all items are relevant to the prompt
+- For summaries: Focus on the most important concepts
+
+=== DESIGN RULES FOR IMAGE_PROMPT (CRITICAL) ===
+The image must look like a professional informational graphic:
+- Format: Square or vertical orientation (1080x1080 or 1080x1350 aspect ratio)
+- Background: {display_background}
+- Color scheme: {display_color_schema}
+- Title: Extra large bold {display_font_name}, top portion of image
+- Content: Clean, organized layout with clear hierarchy
+- For lists: Use numbered or bulleted format, clearly organized
+- For summaries: Use bullet points for key takeaways, organized sections
+- Add small "{display_username}" handle in bottom-left or bottom-right corner
+- High contrast, modern, premium feel — looks expensive
+- DO NOT include technical specifications like pixel sizes, font names, font sizes, or hex color codes in the image prompts
+
+=== OUTPUT FORMAT ===
+Return ONLY a valid JSON object (no markdown, no explanation) with exactly these keys:
+
+{{
+  "type": "list" or "summary",
+  "title": "Exact title text that will appear on the image (derived from or matching the user prompt)",
+  "content": "Exact content that will appear on the image (use \\n for line breaks, numbered or bulleted format)",
+  "image_prompt": "Extremely detailed prompt that forces Gemini to render the exact title and content as text on the image. Include layout, colors, fonts, and all text verbatim. Do NOT include pixel sizes, font names, font sizes, or hex color codes."
+}}
+{extra_instructions_section}
+User Prompt: {user_prompt}
+
+Now analyze the prompt, generate the appropriate content (list or summary), and create the infographic following all rules above.
+"""
+
+            logger.info(f"Generating infographic from prompt: {user_prompt}")
+            response = self.llm.invoke([{"role": "user", "content": prompt}])
+            response_text = response.content.strip()
+
+            # Extract JSON from response
+            # Remove markdown code blocks if present
+            if response_text.startswith("```"):
+                response_text = re.sub(r"```json\s*|\s*```", "", response_text).strip()
+
+            result = json.loads(response_text)
+
+            logger.info(
+                f"Successfully generated infographic from prompt (type: {result.get('type', 'unknown')})"
+            )
+            return result
+
+        except Exception as e:
+            logger.error(f"Error generating infographic from prompt: {str(e)}")
+            raise
+
 
 # ============================================================================
 # Graph Nodes
 # ============================================================================
 
 
-async def scrape_article_node(state: CarouselPostState) -> CarouselPostState:
+async def scrape_article_node(
+    state: SocialMediaContentState,
+) -> SocialMediaContentState:
     """Scrape article content from URL."""
     try:
         print("\n" + "=" * 80)
@@ -510,17 +1447,17 @@ async def scrape_article_node(state: CarouselPostState) -> CarouselPostState:
         except NameError:
             base_output_dir = Path.cwd() / "output"
 
-        # Create a folder for this carousel post
-        carousel_folder = base_output_dir / sanitized_title
-        carousel_folder.mkdir(parents=True, exist_ok=True)
+        # Create a folder for this social media content
+        content_folder = base_output_dir / sanitized_title
+        content_folder.mkdir(parents=True, exist_ok=True)
 
-        logger.info(f"Created output folder: {carousel_folder}")
+        logger.info(f"Created output folder: {content_folder}")
 
         print(f"✅ Successfully scraped article: {article_content.get('title')}")
         return {
             **state,
             "article_content": article_content,
-            "output_folder": carousel_folder,
+            "output_folder": content_folder,
             "status": "scraped",
         }
     except Exception as e:
@@ -529,7 +1466,9 @@ async def scrape_article_node(state: CarouselPostState) -> CarouselPostState:
         return {**state, "status": "error", "error": str(e)}
 
 
-async def generate_slides_node(state: CarouselPostState) -> CarouselPostState:
+async def generate_slides_node(
+    state: SocialMediaContentState,
+) -> SocialMediaContentState:
     """Generate carousel slide content using LLM."""
     try:
         print("\n" + "=" * 80)
@@ -539,7 +1478,15 @@ async def generate_slides_node(state: CarouselPostState) -> CarouselPostState:
 
         llm_service = LLMService()
         slides = llm_service.generate_carousel_slides(
-            state["article_content"], state.get("max_slides", 10)
+            state["article_content"],
+            state.get("max_slides", 10),
+            username=state.get("username"),
+            tagline=state.get("tagline"),
+            title=state.get("title"),
+            extra_instructions=state.get("extra_instructions"),
+            font_name=state.get("font_name"),
+            background_info=state.get("background_info"),
+            color_schema=state.get("color_schema"),
         )
 
         if not slides:
@@ -558,7 +1505,9 @@ async def generate_slides_node(state: CarouselPostState) -> CarouselPostState:
         return {**state, "status": "error", "error": str(e)}
 
 
-async def generate_images_node(state: CarouselPostState) -> CarouselPostState:
+async def generate_images_node(
+    state: SocialMediaContentState,
+) -> SocialMediaContentState:
     """Generate images for each carousel slide."""
     try:
         print("\n" + "=" * 80)
@@ -581,8 +1530,14 @@ async def generate_images_node(state: CarouselPostState) -> CarouselPostState:
             print(f"Generating image for slide {slide_number}...")
 
             # Generate image
+            image_provider = state.get("image_provider") or IMAGE_PROVIDER
+            image_model = state.get("image_model") or IMAGE_MODEL
             image_info = generate_carousel_image(
-                image_prompt, slide_number, output_folder
+                image_prompt,
+                slide_number,
+                output_folder,
+                provider=image_provider,
+                model=image_model,
             )
 
             # Add image info to slide
@@ -615,7 +1570,7 @@ async def generate_images_node(state: CarouselPostState) -> CarouselPostState:
         return {**state, "status": "error", "error": str(e)}
 
 
-async def agent_node(state: CarouselPostState) -> CarouselPostState:
+async def agent_node(state: SocialMediaContentState) -> SocialMediaContentState:
     """Main agent node that orchestrates the workflow."""
     try:
         current_status = state.get("status", "initialized")
@@ -639,7 +1594,7 @@ async def agent_node(state: CarouselPostState) -> CarouselPostState:
         return {**state, "status": "error", "error": str(e)}
 
 
-def should_continue(state: CarouselPostState) -> Literal["continue", "end"]:
+def should_continue(state: SocialMediaContentState) -> Literal["continue", "end"]:
     """Determine if the workflow should continue or end."""
     status = state.get("status", "")
 
@@ -656,10 +1611,10 @@ def should_continue(state: CarouselPostState) -> Literal["continue", "end"]:
 # ============================================================================
 
 
-def create_carousel_post_generator_agent():
-    """Create and compile the carousel post generator LangGraph agent."""
+def create_social_media_content_generator_agent():
+    """Create and compile the social media content generator LangGraph agent."""
 
-    workflow = StateGraph(CarouselPostState)
+    workflow = StateGraph(SocialMediaContentState)
 
     workflow.add_node("agent", agent_node)
     workflow.set_entry_point("agent")
@@ -684,25 +1639,43 @@ def create_carousel_post_generator_agent():
 # ============================================================================
 
 
-class CarouselPostGeneratorAgent:
-    """Standalone LangGraph agent for carousel post generation."""
+class SocialMediaContentGeneratorAgent:
+    """Standalone LangGraph agent for social media content generation."""
 
     def __init__(self):
-        self.graph = create_carousel_post_generator_agent()
-        logger.info("Carousel Post Generator Agent initialized")
+        self.graph = create_social_media_content_generator_agent()
+        logger.info("Social Media Content Generator Agent initialized")
 
     async def process(
         self,
         url: str,
         max_slides: int = 10,
+        username: Optional[str] = None,
+        tagline: Optional[str] = None,
+        title: Optional[str] = None,
+        extra_instructions: Optional[str] = None,
+        font_name: Optional[str] = None,
+        background_info: Optional[str] = None,
+        color_schema: Optional[str] = None,
+        image_provider: Optional[str] = None,
+        image_model: Optional[str] = None,
         thread_id: str = "default",
     ) -> Dict[str, Any]:
         """
-        Process an article URL and generate carousel post.
+        Process an article URL and generate social media content (carousel post).
 
         Args:
             url: Article URL to process
             max_slides: Maximum number of slides to generate (default: 10)
+            username: Social media username (e.g., "@robots")
+            tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+            title: Custom title to override scraped article title
+            extra_instructions: Additional instructions for the LLM
+            font_name: Font name for slides
+            background_info: Background description
+            color_schema: Color schema description
+            image_provider: Image generation provider ("openrouter" or "openai")
+            image_model: Image generation model (e.g., "dall-e-3", "google/gemini-2.5-flash-image")
             thread_id: Thread ID for conversation tracking
 
         Returns:
@@ -716,6 +1689,15 @@ class CarouselPostGeneratorAgent:
                 "messages": [],
                 "url": url,
                 "max_slides": max_slides,
+                "username": username,
+                "tagline": tagline,
+                "title": title,
+                "extra_instructions": extra_instructions,
+                "font_name": font_name,
+                "background_info": background_info,
+                "color_schema": color_schema,
+                "image_provider": image_provider,
+                "image_model": image_model,
                 "output_folder": None,
                 "article_content": None,
                 "slides": None,
@@ -725,7 +1707,7 @@ class CarouselPostGeneratorAgent:
             }
 
             print("\n" + "=" * 80)
-            print("🚀 Starting Carousel Post Generator Agent Workflow")
+            print("🚀 Starting Social Media Content Generator Agent Workflow")
             print("=" * 80)
             config = {"configurable": {"thread_id": thread_id}}
             result = None
@@ -760,7 +1742,7 @@ class CarouselPostGeneratorAgent:
             }
 
         except Exception as e:
-            logger.error(f"Error processing carousel post request: {str(e)}")
+            logger.error(f"Error processing social media content request: {str(e)}")
             raise
 
 
@@ -769,9 +1751,9 @@ class CarouselPostGeneratorAgent:
 # ============================================================================
 
 
-def create_agent() -> CarouselPostGeneratorAgent:
-    """Factory function to create a new carousel post generator agent instance."""
-    return CarouselPostGeneratorAgent()
+def create_agent() -> SocialMediaContentGeneratorAgent:
+    """Factory function to create a new social media content generator agent instance."""
+    return SocialMediaContentGeneratorAgent()
 
 
 # ============================================================================
@@ -802,4 +1784,416 @@ def sanitize_filename(text: str, max_length: int = 50) -> str:
     if len(sanitized) > max_length:
         sanitized = sanitized[:max_length].rstrip("-")
 
-    return sanitized if sanitized else "carousel_post"
+    return sanitized if sanitized else "social_media_content"
+
+
+# ============================================================================
+# Single Image Generation Helper
+# ============================================================================
+
+
+async def generate_single_informational_image(
+    url: str,
+    username: Optional[str] = None,
+    tagline: Optional[str] = None,
+    title: Optional[str] = None,
+    extra_instructions: Optional[str] = None,
+    font_name: Optional[str] = None,
+    background_info: Optional[str] = None,
+    color_schema: Optional[str] = None,
+    image_provider: Optional[str] = None,
+    image_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Generate a single informational image from an article URL.
+
+    Args:
+        url: Article URL to process
+        username: Social media username (e.g., "@robots")
+        tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+        title: Custom title to override scraped article title
+        extra_instructions: Additional instructions for the LLM
+
+    Returns:
+        Dictionary containing image information and metadata
+    """
+    try:
+        # Scrape article content
+        logger.info(f"Scraping article from: {url}")
+        article_content = await scrape_article_content(url)
+
+        if not article_content or not article_content.get("fullText"):
+            raise ValueError("No article content found")
+
+        # Create output folder based on article title
+        article_title = article_content.get("title", "informational_image")
+        sanitized_title = sanitize_filename(article_title)
+
+        try:
+            script_dir = Path(__file__).parent.absolute()
+            base_output_dir = script_dir / "output"
+        except NameError:
+            base_output_dir = Path.cwd() / "output"
+
+        # Create a folder for this image
+        image_folder = base_output_dir / sanitized_title
+        image_folder.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Created output folder: {image_folder}")
+
+        # Generate content using LLM
+        llm_service = LLMService()
+        image_content = llm_service.generate_single_informational_image(
+            article_content,
+            username=username,
+            tagline=tagline,
+            title=title,
+            extra_instructions=extra_instructions,
+            font_name=font_name,
+            background_info=background_info,
+            color_schema=color_schema,
+        )
+
+        # Generate the image
+        image_prompt = image_content.get("image_prompt", "")
+        logger.info("Generating informational image...")
+
+        image_provider_param = image_provider or IMAGE_PROVIDER
+        image_model_param = image_model or IMAGE_MODEL
+        image_info = generate_carousel_image(
+            image_prompt,
+            1,
+            image_folder,
+            orientation="square",
+            provider=image_provider_param,
+            model=image_model_param,
+        )
+
+        if not image_info:
+            raise ValueError("Failed to generate image")
+
+        return {
+            "status": "success",
+            "url": url,
+            "article_title": article_title,
+            "is_list_post": image_content.get("is_list_post", False),
+            "title": image_content.get("title", ""),
+            "content": image_content.get("content", ""),
+            "image_prompt": image_prompt,
+            "image_path": image_info["path"],
+            "image_filename": image_info["filename"],
+            "image_relative_path": image_info["relative_path"],
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating single informational image: {str(e)}")
+        raise
+
+
+async def generate_infographic_from_prompt(
+    user_prompt: str,
+    username: Optional[str] = None,
+    tagline: Optional[str] = None,
+    font_name: Optional[str] = None,
+    background_info: Optional[str] = None,
+    color_schema: Optional[str] = None,
+    extra_instructions: Optional[str] = None,
+    image_provider: Optional[str] = None,
+    image_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Generate an infographic from a user text prompt.
+
+    Args:
+        user_prompt: User's text prompt (e.g., "top 10 free AI tools")
+        username: Social media username (e.g., "@robots")
+        tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+        font_name: Font name for the infographic
+        background_info: Background description
+        color_schema: Color schema description
+        extra_instructions: Additional instructions for the LLM
+
+    Returns:
+        Dictionary containing infographic information and metadata
+    """
+    try:
+        # Create output folder based on prompt
+        sanitized_prompt = sanitize_filename(user_prompt[:50])
+
+        try:
+            script_dir = Path(__file__).parent.absolute()
+            base_output_dir = script_dir / "output"
+        except NameError:
+            base_output_dir = Path.cwd() / "output"
+
+        # Create a folder for this infographic
+        infographic_folder = base_output_dir / sanitized_prompt
+        infographic_folder.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Created output folder: {infographic_folder}")
+
+        # Generate content using LLM
+        llm_service = LLMService()
+        infographic_content = llm_service.generate_infographic_from_prompt(
+            user_prompt=user_prompt,
+            username=username,
+            tagline=tagline,
+            font_name=font_name,
+            background_info=background_info,
+            color_schema=color_schema,
+            extra_instructions=extra_instructions,
+        )
+
+        # Generate the image
+        image_prompt = infographic_content.get("image_prompt", "")
+        infographic_type = infographic_content.get("type", "unknown")
+        logger.info(f"Generating infographic image (type: {infographic_type})...")
+
+        image_provider_param = image_provider or IMAGE_PROVIDER
+        image_model_param = image_model or IMAGE_MODEL
+        image_info = generate_carousel_image(
+            image_prompt,
+            1,
+            infographic_folder,
+            orientation="square",
+            provider=image_provider_param,
+            model=image_model_param,
+        )
+
+        if not image_info:
+            raise ValueError("Failed to generate image")
+
+        return {
+            "status": "success",
+            "prompt": user_prompt,
+            "type": infographic_type,
+            "title": infographic_content.get("title", ""),
+            "content": infographic_content.get("content", ""),
+            "image_prompt": image_prompt,
+            "image_path": image_info["path"],
+            "image_filename": image_info["filename"],
+            "image_relative_path": image_info["relative_path"],
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating infographic from prompt: {str(e)}")
+        raise
+
+
+async def generate_carousel_from_prompt(
+    user_prompt: str,
+    max_slides: int = 10,
+    username: Optional[str] = None,
+    tagline: Optional[str] = None,
+    font_name: Optional[str] = None,
+    background_info: Optional[str] = None,
+    color_schema: Optional[str] = None,
+    extra_instructions: Optional[str] = None,
+    image_provider: Optional[str] = None,
+    image_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Generate a carousel post from a user text prompt.
+
+    Args:
+        user_prompt: User's text prompt (e.g., "top 10 free AI tools", "how to learn React")
+        max_slides: Maximum number of slides to generate
+        username: Social media username (e.g., "@robots")
+        tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+        font_name: Font name for the carousel slides
+        background_info: Background description
+        color_schema: Color schema description
+        extra_instructions: Additional instructions for the LLM
+        image_provider: Image generation provider ("openrouter" or "openai")
+        image_model: Image generation model (e.g., "dall-e-3", "google/gemini-2.5-flash-image")
+
+    Returns:
+        Dictionary containing carousel slides with images
+    """
+    try:
+        # Create output folder based on prompt
+        sanitized_prompt = sanitize_filename(user_prompt[:50])
+
+        try:
+            script_dir = Path(__file__).parent.absolute()
+            base_output_dir = script_dir / "output"
+        except NameError:
+            base_output_dir = Path.cwd() / "output"
+
+        # Create a folder for this carousel
+        carousel_folder = base_output_dir / sanitized_prompt
+        carousel_folder.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Created output folder: {carousel_folder}")
+
+        # Generate content using LLM
+        llm_service = LLMService()
+        carousel_slides = llm_service.generate_carousel_from_prompt(
+            user_prompt=user_prompt,
+            max_slides=max_slides,
+            username=username,
+            tagline=tagline,
+            font_name=font_name,
+            background_info=background_info,
+            color_schema=color_schema,
+            extra_instructions=extra_instructions,
+        )
+
+        # Generate images for each slide
+        image_provider_param = image_provider or IMAGE_PROVIDER
+        image_model_param = image_model or IMAGE_MODEL
+        slides_with_images = []
+
+        for slide in carousel_slides:
+            slide_number = slide.get("slide_number", 0)
+            image_prompt = slide.get("image_prompt", "")
+            title = slide.get("title", "")
+
+            logger.info(f"Generating image for slide {slide_number}: {title[:50]}...")
+
+            image_info = generate_carousel_image(
+                image_prompt,
+                slide_number,
+                carousel_folder,
+                orientation="square",
+                provider=image_provider_param,
+                model=image_model_param,
+            )
+
+            if not image_info:
+                logger.warning(f"Failed to generate image for slide {slide_number}")
+                continue
+
+            slide["image_path"] = image_info["path"]
+            slide["image_filename"] = image_info["filename"]
+            slide["image_relative_path"] = image_info["relative_path"]
+            slides_with_images.append(slide)
+
+        if not slides_with_images:
+            raise ValueError("Failed to generate any slides with images")
+
+        # Determine a title from the first slide or prompt
+        carousel_title = (
+            slides_with_images[0].get("title", sanitized_prompt)
+            if slides_with_images
+            else sanitized_prompt
+        )
+
+        return {
+            "status": "success",
+            "prompt": user_prompt,
+            "article_title": carousel_title,
+            "total_slides": len(slides_with_images),
+            "slides": slides_with_images,
+            "processing_status": "completed",
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating carousel from prompt: {str(e)}")
+        raise
+
+
+async def generate_infographic_with_reference_image(
+    user_prompt: str,
+    reference_image_bytes: bytes,
+    username: Optional[str] = None,
+    tagline: Optional[str] = None,
+    font_name: Optional[str] = None,
+    background_info: Optional[str] = None,
+    color_schema: Optional[str] = None,
+    image_provider: Optional[str] = None,
+    image_model: Optional[str] = None,
+) -> Dict[str, Any]:
+    """
+    Generate an infographic from a user text prompt using a reference image as design guide.
+
+    Args:
+        user_prompt: User's text prompt describing what infographic to create
+        reference_image_bytes: Reference image file bytes to use as design guide
+        username: Social media username (e.g., "@robots")
+        tagline: Tagline/brand message (e.g., "daily programming tips & tricks")
+        font_name: Font name for the infographic
+        background_info: Background description
+        color_schema: Color schema description
+
+    Returns:
+        Dictionary containing infographic information and metadata
+    """
+    try:
+        # Convert image to base64
+        reference_image_base64 = base64.b64encode(reference_image_bytes).decode("utf-8")
+
+        # Create output folder based on prompt
+        sanitized_prompt = sanitize_filename(user_prompt[:50])
+
+        try:
+            script_dir = Path(__file__).parent.absolute()
+            base_output_dir = script_dir / "output"
+        except NameError:
+            base_output_dir = Path.cwd() / "output"
+
+        # Create a folder for this infographic
+        infographic_folder = base_output_dir / f"{sanitized_prompt}_with_reference"
+        infographic_folder.mkdir(parents=True, exist_ok=True)
+
+        logger.info(f"Created output folder: {infographic_folder}")
+
+        # Generate content using LLM (same as generate_infographic_from_prompt)
+        llm_service = LLMService()
+        infographic_content = llm_service.generate_infographic_from_prompt(
+            user_prompt=user_prompt,
+            username=username,
+            tagline=tagline,
+            font_name=font_name,
+            background_info=background_info,
+            color_schema=color_schema,
+        )
+
+        # Extract content from LLM response for the reference-based generation
+        title = infographic_content.get("title", "")
+        content = infographic_content.get("content", "")
+
+        # Create a more focused content-only prompt
+        enhanced_prompt = f"""TITLE: {title}
+
+CONTENT:
+{content}
+
+NOTE: The reference image will define all design elements. Just ensure the above text content is properly placed in the new design following the reference image's exact layout and typography."""
+
+        # Generate the image with reference
+        infographic_type = infographic_content.get("type", "unknown")
+        logger.info(
+            f"Generating infographic image with reference (type: {infographic_type})..."
+        )
+
+        image_provider_param = image_provider or IMAGE_PROVIDER
+        image_model_param = image_model or IMAGE_MODEL
+        image_info = generate_carousel_image(
+            enhanced_prompt,
+            1,
+            infographic_folder,
+            orientation="square",
+            reference_image_base64=reference_image_base64,
+            provider=image_provider_param,
+            model=image_model_param,
+        )
+
+        if not image_info:
+            raise ValueError("Failed to generate image")
+
+        return {
+            "status": "success",
+            "prompt": user_prompt,
+            "type": infographic_type,
+            "title": infographic_content.get("title", ""),
+            "content": infographic_content.get("content", ""),
+            "image_prompt": enhanced_prompt,
+            "image_path": image_info["path"],
+            "image_filename": image_info["filename"],
+            "image_relative_path": image_info["relative_path"],
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating infographic with reference image: {str(e)}")
+        raise

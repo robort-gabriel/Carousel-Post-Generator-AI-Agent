@@ -3,6 +3,7 @@ fastapi==0.115.0
 uvicorn[standard]==0.32.0
 slowapi==0.1.9
 gunicorn==21.2.0
+python-multipart>=0.0.6
 
 # Core Dependencies
 langgraph>=0.0.20
@@ -20,4 +21,7 @@ requests>=2.31.0
 # Utilities
 pydantic>=2.10.4
 pydantic-settings>=2.7.0
+
+# Image Processing (for SVG conversion - required for Grok and text-based models)
+cairosvg==2.8.2
 
